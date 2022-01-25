@@ -42,7 +42,7 @@ let loopInterval = 1000; //ms
 let cycleTimingDelay = 1600;
 let queueDelay = 100; // the delay that it can take for a script to start, used to pessimistically schedule things in advance
 let maxBatches = 40; // the max number of batches this daemon will spool up to avoid running out of IRL ram (TODO: Stop wasting RAM by scheduling batches so far in advance. e.g. Grind XP while waiting for cycle start!)
-let maxTargets = 0; // Initial value, will grow if there is an abundance of RAM
+let maxTargets; // Initial value, will grow if there is an abundance of RAM
 let maxPreppingAtMaxTargets = 3; // The max servers we can prep when we're at our current max targets and have spare RAM
 // Allows some home ram to be reserved for ad-hoc terminal script running and when home is explicitly set as the "preferred server" for starting a helper 
 let homeReservedRam = 32;
@@ -91,6 +91,7 @@ let lastUpdate = "";
 let lastUpdateTime = Date.now();
 let lowUtilizationIterations = 0;
 let highUtilizationIterations = 0;
+let lastShareTime = 0; // Tracks when share was last invoked so we can respect the configured share-cooldown
 
 // Replacements / wrappers for various NS calls to let us keep track of them in one place and consolidate where possible
 let log = (...args) => logHelper(_ns, ...args);
@@ -127,28 +128,32 @@ function shouldReserveMoney() {
 let options;
 const argsSchema = [
     ['h', false], // Do nothing but hack, no prepping (drains servers to 0 money, if you want to do that for some reason)
-    ['hack-only', false],
+    ['hack-only', false], // Same as above
     ['s', false], // Enable Stock Manipulation
-    ['stock-manipulation', false],
-    ['stock-manipulation-focus', false], // Stocks are main source of income - kill any scripts that would do them harm
+    ['stock-manipulation', false], // Same as above
+    ['stock-manipulation-focus', false], // Stocks are main source of income - kill any scripts that would do them harm (TODO: Enable automatically in BN8)
     ['v', false], // Detailed logs about batch scheduling / tuning
-    ['verbose', false],
+    ['verbose', false], // Same as above
     ['o', false], // Good for debugging, run the main targettomg loop once then stop, with some extra logs
-    ['run-once', false],
+    ['run-once', false], // Same as above
     ['x', false], // Focus on a strategy that produces the most hack EXP rather than money
-    ['xp-only', false],
+    ['xp-only', false], // Same as above
     ['n', false], // Can toggle on using hacknet nodes for extra hacking ram (at the expense of hash production)
-    ['silent-misfires', false],
-    ['use-hacknet-nodes', false],
-    ['initial-max-targets', 2],
+    ['use-hacknet-nodes', false], // Same as above
+    ['silent-misfires', false], // Instruct remote scripts not to alert when they misfire
+    ['initial-max-targets', 2], // Initial number of servers to target / prep (TODO: Scale this as BN progression increases)
     ['max-steal-percentage', 0.75], // Don't steal more than this in case something goes wrong with timing or scheduling, it's hard to recover from
-    ['cycle-timing-delay', 16000],
-    ['queue-delay', 1000],
-    ['max-batches', 40],
+    ['cycle-timing-delay', 16000], // Time 
+    ['queue-delay', 1000], // Delay before the first script begins, to give time for all scripts to be scheduled
+    ['max-batches', 40], // Maximum overlapping cycles to schedule in advance. Note that once scheduled, we must wait for all batches to complete before we can schedule more
     ['i', false], // Farm intelligence with manual hack.
     ['reserved-ram', 32],
     ['looping-mode', false], // Set to true to attempt to schedule perpetually-looping tasks.
     ['recovery-thread-padding', 1],
+    ['share', false], // Enable sharing free ram to increase faction rep gain (enabled automatically once RAM is sufficient)
+    ['no-share', false], // Disable sharing free ram to increase faction rep gain
+    ['share-cooldown', 5000], // Wait before attempting to schedule more share threads (e.g. to free RAM to be freed for hack batch scheduling first)
+    ['share-max-utilization', 0.9], // Set to 1 if you don't care to leave any RAM free after sharing
 ];
 
 export function autocomplete(data, args) {
@@ -170,6 +175,7 @@ export async function main(ns) {
     // Reset global vars on startup since they persist in memory in certain situations (such as on Augmentation)
     lastUpdate = "";
     lastUpdateTime = Date.now();
+    maxTargets = 2;
     lowUtilizationIterations = 0;
     highUtilizationIterations = 0;
     serverListByFreeRam = [];
@@ -250,10 +256,11 @@ export async function main(ns) {
     ];
     periodicScripts.forEach(tool => tool.name = getFilePath(tool.name));
     hackTools = [
-        { name: "/Remote/weak-target.js", shortName: "weak" },
+        { name: "/Remote/weak-target.js", shortName: "weak", threadSpreadingAllowed: true },
         { name: "/Remote/grow-target.js", shortName: "grow" },
         { name: "/Remote/hack-target.js", shortName: "hack" },
-        { name: "/Remote/manualhack-target.js", shortName: "manualhack" }
+        { name: "/Remote/manualhack-target.js", shortName: "manualhack" },
+        { name: "/Remote/share.js", shortName: "share", threadSpreadingAllowed: true },
     ];
     hackTools.forEach(tool => tool.name = getFilePath(tool.name));
     // TODO: Revive these tools when needed.
@@ -431,7 +438,7 @@ async function doTargetingLoop(ns) {
                     targeting.push(server); // TODO: While targeting, we should keep queuing more batches
                 } else if (server.isPrepping()) { // Note servers already being prepped from a prior loop
                     prepping.push(server);
-                } else if (isWorkCapped() || xpOnly) { // Various conditions for which we'll postpone any additional work on servers (computed at the end of each loop)
+                } else if (isWorkCapped() || xpOnly) { // Various conditions for which we'll postpone any additional work on servers
                     if (xpOnly && (((nextXpCycleEnd[server.name] || 0) > start - 10000) || server.isXpFarming()))
                         targeting.push(server); // A server counts as "targeting" if in XP mode and its due to be farmed or was in the past 10 seconds
                     else
@@ -458,6 +465,13 @@ async function doTargetingLoop(ns) {
                         log('Targeting failed for "' + server.name + '" (RAM Utilization: ' + (getTotalNetworkUtilization() * 100).toFixed(2) + '%)');
                         failed.push(server);
                     }
+                }
+
+                // Hack: Quickly ramp up our max-targets without waiting for the next loop if we are far below the low-utilization threshold
+                if (lowUtilizationIterations >= 5 && targeting.length == maxTargets) {
+                    let network = getNetworkStats();
+                    let utilizationPercent = network.totalUsedRam / network.totalMaxRam;
+                    if (utilizationPercent < lowUtilizationThreshold / 2) maxTargets++;
                 }
             }
 
@@ -498,7 +512,7 @@ async function doTargetingLoop(ns) {
             let intervalsPerTargetCycle = targeting.length == 0 ? 120 :
                 Math.ceil((targeting.reduce((max, t) => Math.max(max, t.timeToWeaken()), 0) + cycleTimingDelay) / loopInterval);
             //log(`intervalsPerTargetCycle: ${intervalsPerTargetCycle} lowUtilizationIterations: ${lowUtilizationIterations} loopInterval: ${loopInterval}`);
-            if ((lowUtilizationIterations > intervalsPerTargetCycle || utilizationPercent < 0.01) && skipped.length > 0 && maxTargets < serverListByTargetOrder.length) {
+            if (lowUtilizationIterations > intervalsPerTargetCycle && skipped.length > 0 && maxTargets < serverListByTargetOrder.length) {
                 maxTargets++;
                 log(`Increased max targets to ${maxTargets} since utilization (${formatNumber(utilizationPercent * 100, 3)}%) has been quite low for ${lowUtilizationIterations} iterations.`);
                 lowUtilizationIterations = 0; // Reset the counter of low-utilization iterations
@@ -509,17 +523,30 @@ async function doTargetingLoop(ns) {
             }
             maxTargets = Math.max(maxTargets, targeting.length - 1, 1); // Ensure that after a restart, maxTargets start off with no less than 1 fewer max targets
 
-            // Ifthere is still unspent utilization, we can use a chunk of it it to farm XP
+            // If there is still unspent utilization, we can use a chunk of it it to farm XP
             if (xpOnly) { // If all we want to do is gain hack XP
                 let time = await kickstartHackXp(ns, 1.00, verbose);
                 loopInterval = Math.min(1000, time || 1000); // Wake up earlier if we're almost done an XP cycle
-            } else if (!workCapped && lowUtilizationIterations > 10) {
+            } else if (!isWorkCapped() && lowUtilizationIterations > 10) {
                 let expectedRunTime = getXPFarmServer().timeToHack();
                 let freeRamToUse = (expectedRunTime < loopInterval) ? // If expected runtime is fast, use as much RAM as we want, it'll all be free by our next loop.
                     1 - (1 - lowUtilizationThreshold) / (1 - utilizationPercent) : // Take us just up to the threshold for 'lowUtilization' so we don't cause unecessary server purchases
                     1 - (1 - maxUtilizationPreppingAboveHackLevel - 0.05) / (1 - utilizationPercent); // Otherwise, leave more room (e.g. for scheduling new batches.)
                 await kickstartHackXp(ns, freeRamToUse, verbose && (expectedRunTime > 10000 || lowUtilizationIterations % 10 == 0), 1);
             }
+
+            // Use any unspent RAM on share.
+            const maxShareUtilization = options['share-max-utilization']
+            if (!isWorkCapped() && utilizationPercent < maxShareUtilization && (Date.now() - lastShareTime) > options['share-cooldown'] &&
+                !options['no-share'] && (options['share'] || network.totalMaxRam > 1024)) { // If not explicitly enabled or disabled, auto-enable share at 1TB of network RAM
+                let shareTool = getTool("share");
+                let shareThreads = Math.floor(shareTool.getMaxThreads() * maxShareUtilization);
+                if (shareThreads > 0) {
+                    if (await arbitraryExecution(ns, getTool('share'), shareThreads, [Date.now()], null, true)) // Note: Need a unique argument to multiple parallel share scripts on the same server
+                        if (verbose) log(`Sharing ${formatRam(shareThreads * 4)} RAM with factions using ${shareThreads.toLocaleString()} share threads.`);
+                    lastShareTime = Date.now();
+                }
+            }// else log(`Not Sharing. workCapped: ${isWorkCapped()} utilizationPercent: ${utilizationPercent} maxShareUtilization: ${maxShareUtilization} cooldown: ${formatDuration(Date.now() - lastShareTime)} networkRam: ${network.totalMaxRam}`);
 
             // Log some status updates
             let keyUpdates = `Of ${serverListByFreeRam.length} total servers:\n > ${noMoney.length} were ignored (owned or no money)`;
@@ -1078,7 +1105,7 @@ export async function arbitraryExecution(ns, tool, threads, args, preferredServe
     // Helper function to compute the most threads a server can run 
     let computeMaxThreads = function (server) {
         if (tool.cost == 0) return 1;
-        let ramAvailable = server.ramAvailable();
+        let ramAvailable = server.ramAvailable() - 0.001; // Hack: Due to imprecision errors in game, a RAM "perfect fit" doesn't fit, so simulate less space
         // It's a hack, but we know that "home"'s reported ram available is lowered to leave room for "preferred" jobs, 
         // so if this is a preferred job, ignore what the server object says and get it from the source
         if (server.name == "home" && preferredServerName == "home")
@@ -1138,8 +1165,8 @@ export async function arbitraryExecution(ns, tool, threads, args, preferredServe
             splitThreads = true;
         }
     }
-    // the run failed if there were threads left to schedule after we exhausted our pool of servers
-    if (remainingThreads > 0)
+    // The run failed if there were threads left to schedule after we exhausted our pool of servers
+    if (remainingThreads > 0 && threads < Number.MAX_SAFE_INTEGER)
         log(`ERROR: Ran out of RAM to run ${tool.name} against ${args[0]} - ${threads - remainingThreads} of ${threads} threads were spawned.`, false, 'error');
     if (splitThreads && !tool.isThreadSpreadingAllowed)
         return false;
@@ -1520,7 +1547,7 @@ function buildToolkit(ns) {
             args: toolConfig.args || [],
             shouldRun: toolConfig.shouldRun,
             requiredServer: toolConfig.requiredServer,
-            isThreadSpreadingAllowed: toolConfig.shortName === "weak",
+            isThreadSpreadingAllowed: toolConfig.threadSpreadingAllowed === true,
             cost: ns.getScriptRam(toolConfig.name, daemonHost),
             canRun: function (server) {
                 return doesFileExist(this.name, server.name) && server.ramAvailable() >= this.cost;
