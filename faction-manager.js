@@ -231,8 +231,9 @@ async function updateFactionData(ns, allFactions, factionsToOmit) {
         joined: joinedFactions.includes(faction),
         reputation: dictFactionReps[faction] || 0,
         favor: dictFactionFavors[faction],
-        donationsUnlocked: dictFactionFavors[faction] >= favorToDonate && faction !== gangFaction // Can't donate to gang factions for rep
-            && faction !== "Church of the Machine God", // Can't donate to this faction either
+        donationsUnlocked: dictFactionFavors[faction] >= favorToDonate &&
+            // As a rule, cannot donate to gang factions or any of the below factions - need to use other mechanics to gain rep.
+            ![gangFaction, "Bladeburners", "Church of the Machine God"].includes(faction),
         augmentations: dictFactionAugs[faction],
         unownedAugmentations: function (includeNf = false) { return this.augmentations.filter(aug => !simulatedOwnedAugmentations.includes(aug) && (aug != strNF || includeNf)) },
         mostExpensiveAugCost: function () { return this.augmentations.map(augName => augmentationData[augName]).reduce((max, aug) => Math.max(max, aug.price), 0) },
@@ -552,8 +553,8 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
             }
         }
         // If after the above potential attempt to join a faction offering NF we still can't afford it, we're done here
-        if (!augNf.getFromJoined() && !augNf.canAfford() && !augNf.canAffordWithDonation())
-            return log("Cannot buy any NF due to no joined or joinable factions offering it.");
+        if (!augNf.getFromJoined() || !augNf.canAfford() && !augNf.canAffordWithDonation())
+            return log(ns, "Cannot buy any NF due to no joined or joinable factions offering it.");
     }
     // Start adding as many neuroflux levels as we can afford
     let nfPurchased = purchaseableAugs.filter(a => a.name === augNf.name).length;
