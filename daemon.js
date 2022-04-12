@@ -258,7 +258,7 @@ export async function main(ns) {
         { interval: 28000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "4h", "--max-spend", ns.getServerMoneyAvailable("home") * 0.1] },
         { interval: 28500, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "8h", "--max-spend", ns.getServerMoneyAvailable("home") * 0.01] },
         // Buy upgrades regardless of payoff if they cost less than 0.1% of our money
-        { interval: 29000, name: "hacknet-upgrade-manager.js", tail: true, shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "1E100h", "--max-spend", ns.getServerMoneyAvailable("home") * 0.001] },
+        { interval: 29000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "1E100h", "--max-spend", ns.getServerMoneyAvailable("home") * 0.001] },
         {
             interval: 30000, name: "/Tasks/ram-manager.js", args: ['--budget', '0.25',], // Spend about 25% of un-reserved cash on home RAM upgrades (permanent) when they become available
             shouldRun: () => 4 in dictSourceFiles && dictSourceFiles[4] >= 2 && !shouldReserveMoney() && shouldImproveHacking() // Only trigger if we have SF4, not saving for anything, and hack income is important
@@ -329,7 +329,7 @@ async function kickstartHackXp(ns) {
                     log(ns, `INFO: Cannot study, because you are in city ${playerStats.city} which has no known university, and you cannot afford to travel to another city.`);
                 else {
                     const course = playerStats.city == "Sector-12" ? "Study Computer Science" : "Algorithms"; // Assume if we are still in Sector-12 we are poor and should only take the free course
-                    await getNsDataThroughFile(ns, `ns.universityCourse('${university}', '${course}')`, '/Temp/study-for-hack-xp.txt');
+                    await getNsDataThroughFile(ns, `ns.universityCourse('${university}', '${course}', false)`, '/Temp/study-for-hack-xp.txt');
                     startedStudying = true;
                     await ns.asleep(studyTime * 1000); // Wait for studies to affect Hack XP. This will often greatly reduce time-to-hack/grow/weaken, and avoid a slow first cycle
                 }
