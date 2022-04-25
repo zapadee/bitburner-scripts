@@ -1,4 +1,4 @@
-import { log, disableLogs, getFilePath, getNsDataThroughFile, waitForProcessToComplete, getActiveSourceFiles, formatNumberShort } from './helpers.js'
+import { log, disableLogs, getFilePath, instanceCount, getNsDataThroughFile, waitForProcessToComplete, getActiveSourceFiles, formatNumberShort } from './helpers.js'
 
 // Default sripts called at startup and shutdown of stanek
 const defaultStartupScript = getFilePath('daemon.js');
@@ -35,6 +35,7 @@ export function autocomplete(data, args) {
  * IMPORTANT: You should have no other scripts running on home while you do this.
  * NOTE: Stanek stats benefit more from fewer charges with a high avg RAM used per charge, rather than just more charges. **/
 export async function main(ns) {
+    if (await instanceCount(ns) > 1) return; // Prevent multiple instances of this script from being started, even with different args.
     disableLogs(ns, ['sleep', 'run', 'getServerMaxRam', 'getServerUsedRam'])
     options = ns.flags(argsSchema);
     let currentServer = ns.getHostname();
@@ -106,9 +107,9 @@ export async function main(ns) {
                     minCharges = Math.min(minCharges, fragment.numCharge) // Track the least-charged fragment (ignoring fragments that take no charge)
             }
             minCharges = Math.ceil(minCharges); // Fractional charges now occur. Round these up.
-            if (minCharges >= maxCharges && !shouldContinue) break; // Max charges reached
-            // We will only charge non-booster fragments. Focus on fragments with the lowest charge until things are even.
-            const fragmentsToCharge = fragments.filter(f => f.id < 100 && Math.ceil(f.numCharge) == minCharges)
+            if (minCharges >= maxCharges && !shouldContinue && fragments.some(f => (chargeAttempts[f.id] || 0) > 0)) break; // Max charges reached
+            // We will only charge non-booster fragments, and fragments that aren't stuck at 0 charge
+            const fragmentsToCharge = fragments.filter(f => f.id < 100 && ((chargeAttempts[f.id] || 0) < 2 || f.numCharge > 0));
 
             // Log a status update
             log(ns, `Charging ${fragmentsToCharge.length}/${fragments.length} fragments ` + (!shouldContinue ? `to ${maxCharges}` : `until faction has ` +
@@ -124,8 +125,9 @@ export async function main(ns) {
                 chargeAttempts[fragment.id] = 1 + (chargeAttempts[fragment.id] || 0);
             }
         }
-        catch (error) {
-            log(ns, `WARNING: Caught (and handled) an error. Continuing execution...\n${String(error)}`, false, 'warning');
+        catch (err) {
+            log(ns, `WARNING: stanek.js Caught (and suppressed) an unexpected error in the main loop:\n` +
+                (typeof err === 'string' ? err : err.message || JSON.stringify(err)), false, 'warning');
         }
         await ns.sleep(100);
     }

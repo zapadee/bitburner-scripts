@@ -1,4 +1,4 @@
-import { formatMoney, formatRam, tryGetBitNodeMultipliers, getNsDataThroughFile, scanAllServers, log } from './helpers.js'
+import { formatMoney, formatRam, instanceCount, getNsDataThroughFile, scanAllServers, log } from './helpers.js'
 
 // The purpose of the host manager is to buy the best servers it can
 // until it thinks RAM is underutilized enough that you don't need to anymore.
@@ -36,6 +36,7 @@ export function autocomplete(data, _) {
 
 /** @param {NS} ns **/
 export async function main(ns) {
+    if (await instanceCount(ns) > 1) return; // Prevent multiple instances of this script from being started, even with different args.
     ns.disableLog('ALL')
     options = ns.flags(argsSchema);
 
@@ -127,7 +128,7 @@ async function tryToBuyBestServerPossible(ns) {
 
     spendableMoney = Math.min(spendableMoney * (1 - pctReservedMoney), spendableMoney - absReservedMoney);
     if (spendableMoney <= 0.01)
-        return setStatus(ns, `${prefix}all cash is currently reserved.`);
+        return setStatus(ns, `${prefix}all cash is currently reserved (% reserve: ${(pctReservedMoney * 100).toFixed(1)}%, abs reserve: ${formatMoney(absReservedMoney)})`);
 
     // Determine the most ram we can buy with our current money
     let exponentLevel = 1;

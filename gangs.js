@@ -1,4 +1,4 @@
-import { formatMoney, formatNumberShort, getNsDataThroughFile, getActiveSourceFiles, runCommand, tryGetBitNodeMultipliers, formatDuration } from './helpers.js'
+import { formatMoney, formatNumberShort, instanceCount, getNsDataThroughFile, getActiveSourceFiles, runCommand, tryGetBitNodeMultipliers, formatDuration } from './helpers.js'
 
 // Global config
 const updateInterval = 200; // We can improve our timing by updating more often than gang stats do (which is every 2 seconds for stats, every 20 seconds for territory)
@@ -63,6 +63,7 @@ export function autocomplete(data, _) {
 
 /** @param {NS} ns **/
 export async function main(ns) {
+    if (await instanceCount(ns) > 1) return; // Prevent multiple instances of this script from being started, even with different args.
     ownedSourceFiles = await getActiveSourceFiles(ns);
     const sf2Level = ownedSourceFiles[2] || 0;
     if (sf2Level == 0)
@@ -72,7 +73,10 @@ export async function main(ns) {
     log(ns, "Starting main loop...");
     while (true) {
         try { await mainLoop(ns); }
-        catch (err) { log(ns, `ERROR: Caught an unhandled error in the main loop: ${String(err)}`, 'error', true); }
+        catch (err) {
+            log(ns, `WARNING: gangs.js Caught (and suppressed) an unexpected error in the main loop:\n` +
+                (typeof err === 'string' ? err : err.message || JSON.stringify(err)), false, 'warning');
+        }
         await ns.sleep(updateInterval);
     }
 }
@@ -85,12 +89,18 @@ async function initialize(ns) {
     pctTraining = options['no-training'] ? 0 : options['training-percentage'];
 
     let loggedWaiting = false;
-    while (!(await getNsDataThroughFile(ns, 'ns.gang.inGang()', '/Temp/player-gang-joined.txt'))) {
-        if (!loggedWaiting) {
-            log(ns, `Waiting to be in a gang. Will create the highest faction gang as soon as it is available...`);
-            loggedWaiting = true;
+    while (!(await getNsDataThroughFile(ns, 'ns.gang.inGang()', '/Temp/gang-inGang.txt'))) {
+        try {
+            if (!loggedWaiting) {
+                log(ns, `Waiting to be in a gang. Will create the highest faction gang as soon as it is available...`);
+                loggedWaiting = true;
+            }
+            await runCommand(ns, `${JSON.stringify(gangsByPower)}.forEach(g => ns.gang.createGang(g))`, '/Temp/gang-createGang.js');
         }
-        await runCommand(ns, `${JSON.stringify(gangsByPower)}.forEach(g => ns.gang.createGang(g))`, '/Temp/gang-createGang.js');
+        catch (err) {
+            log(ns, `WARNING: gangs.js Caught (and suppressed) an unexpected error while waiting to join a gang:\n` +
+                (typeof err === 'string' ? err : err.message || JSON.stringify(err)), false, 'warning');
+        }
         await ns.sleep(1000); // Wait for our human to join a gang
     }
     const playerData = await getNsDataThroughFile(ns, 'ns.getPlayer()', '/Temp/player-info.txt');
